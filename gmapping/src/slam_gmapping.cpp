@@ -168,7 +168,9 @@ void SlamGMapping::init()
 
   got_first_scan_ = false;
   got_map_ = false;
-  
+  orthodontic_map_ = false;
+  orthodontic_map_count_ = 0;
+  initialPose = GMapping::OrientedPoint(0.0, 0.0, 0.0);  
 
   
   // Parameters used by our GMapping wrapper
@@ -187,6 +189,10 @@ void SlamGMapping::init()
   if(!private_nh_.getParam("map_update_interval", tmp))
     tmp = 5.0;
   map_update_interval_.fromSec(tmp);
+
+  if(!private_nh_.getParam("save_pose_interval", tmp))
+    tmp = 60.0;
+  save_pose_interval_.fromSec(tmp);
   
   // Parameters used by GMapping itself
   maxUrange_ = 0.0;  maxRange_ = 0.0; // preliminary default, will be set in initMapper()
@@ -349,6 +355,8 @@ void SlamGMapping::publishLoop(double transform_publish_period){
 
 SlamGMapping::~SlamGMapping()
 {
+  savePoseToTxt();
+
   if(transform_thread_){
     transform_thread_->join();
     delete transform_thread_;
@@ -500,12 +508,11 @@ SlamGMapping::initMapper(const sensor_msgs::LaserScan& scan)
 
 
   /// @todo Expose setting an initial pose
-  GMapping::OrientedPoint initialPose;
-  if(!getOdomPose(initialPose, scan.header.stamp))
-  {
-    ROS_WARN("Unable to determine inital pose of laser! Starting point will be set to zero.");
-    initialPose = GMapping::OrientedPoint(0.0, 0.0, 0.0);
-  }
+  //if(!getOdomPose(initialPose, scan.header.stamp))
+  //{
+   // ROS_WARN("Unable to determine inital pose of laser! Starting point will be set to zero.");
+   // initialPose = GMapping::OrientedPoint(0.0, 0.0, 0.0);
+  //}
 
   gsp_->setMatchingParameters(maxUrange_, maxRange_, sigma_,
                               kernelSize_, lstep_, astep_, iterations_,
@@ -601,10 +608,15 @@ SlamGMapping::laserCallback(const sensor_msgs::LaserScan::ConstPtr& scan)
     return;
 
   static ros::Time last_map_update(0,0);
+  static ros::Time last_pose_save(0.0);
 
   // We can't initialize the mapper until we've got the first scan
   if(!got_first_scan_)
   {
+    if(!orthodonticMap(*scan)) {
+          return;
+    }
+
     if(!initMapper(*scan))
       return;
     got_first_scan_ = true;
@@ -628,6 +640,12 @@ SlamGMapping::laserCallback(const sensor_msgs::LaserScan::ConstPtr& scan)
     map_to_odom_ = (odom_to_laser * laser_to_map).inverse();
     map_to_odom_mutex_.unlock();
 
+    map_pose = mpose;
+    if( (scan->header.stamp - last_pose_save) > save_pose_interval_) {
+      savePoseToTxt();
+      last_pose_save =  scan->header.stamp;
+    }
+
     if(!got_map_ || (scan->header.stamp - last_map_update) > map_update_interval_)
     {
       updateMap(*scan);
@@ -636,6 +654,67 @@ SlamGMapping::laserCallback(const sensor_msgs::LaserScan::ConstPtr& scan)
     }
   } else
     ROS_DEBUG("cannot process scan");
+}
+
+double SlamGMapping::getScanMaxLineAngle(const sensor_msgs::LaserScan& scan, bool& ok) {
+    using namespace line_feature;
+
+    double ret = 0.0;
+    ok = false;
+    std::vector<double> bearings;
+    std::vector<unsigned int> indices;
+    RangeData  rangedata;
+    unsigned int i = 0;
+    unsigned int current_index = 0;
+    for (i = 0; i < scan.ranges.size(); i++) {
+        double dis = scan.ranges[i];
+        double angle = scan.angle_min + scan.angle_increment*i;
+        if( dis >= scan.range_min) {
+            bearings.push_back(angle);
+            indices.push_back(current_index);
+            rangedata.ranges.push_back(dis);
+            rangedata.xs.push_back(dis*cos(angle));
+            rangedata.ys.push_back(dis*sin(angle));
+            current_index++;
+
+        }
+    }
+
+    line_feature_.setCachedRangeData(bearings, indices, rangedata);
+
+    std::vector<gline> lines;
+    line_feature_.extractLines(lines);
+    ok = (lines.size() !=0);
+    if(!ok) {
+        return ret;
+    }
+    gline max= lines[0];
+
+    for (std::vector<gline>::const_iterator cit = lines.begin(); cit != lines.end(); ++cit) {
+        if(cit->distance >max.distance)
+            max = *cit;
+    }
+    ret = max.angle;
+    ok = true;
+    return ret;
+}
+
+
+bool SlamGMapping::orthodonticMap(const sensor_msgs::LaserScan& scan) {
+
+  if (!orthodontic_map_ && scan.ranges.size() > 100) {
+      bool ok;
+      double angle = getScanMaxLineAngle(scan, ok);
+      if( ok || orthodontic_map_count_ > 40 ) {
+          double theta = std::fmod(angle, M_PI/2.0);
+          initialPose = GMapping::OrientedPoint(0.0, 0.0, -theta);
+          ROS_INFO("correction map angle: %f", -theta);
+          orthodontic_map_ = true;
+          orthodontic_map_count_ = 0;
+      }
+      orthodontic_map_count_++;
+  }
+  return orthodontic_map_;
 }
 
 double
@@ -788,4 +867,15 @@ void SlamGMapping::publishTransform()
   ros::Time tf_expiration = ros::Time::now() + ros::Duration(tf_delay_);
   tfB_->sendTransform( tf::StampedTransform (map_to_odom_, tf_expiration, map_frame_, odom_frame_));
   map_to_odom_mutex_.unlock();
+}
+
+void SlamGMapping::savePoseToTxt() {
+  std::ofstream pose_output;
+  pose_output.open("initialpose");
+  if(pose_output.is_open()) {
+      pose_output << map_pose.x << std::endl;
+      pose_output << map_pose.y << std::endl;
+      pose_output << map_pose.theta << std::endl;
+      pose_output.close();
+  }
 }

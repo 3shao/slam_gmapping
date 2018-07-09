@@ -16,6 +16,7 @@
 
 /* Author: Brian Gerkey */
 
+#include "line_feature.h"
 #include "ros/ros.h"
 #include "sensor_msgs/LaserScan.h"
 #include "std_msgs/Float64.h"
@@ -29,6 +30,7 @@
 #include "gmapping/sensor/sensor_base/sensor.h"
 
 #include <boost/thread.hpp>
+
 
 class SlamGMapping
 {
@@ -78,6 +80,7 @@ class SlamGMapping
     nav_msgs::GetMap::Response map_;
 
     ros::Duration map_update_interval_;
+    ros::Duration save_pose_interval_;
     tf::Transform map_to_odom_;
     boost::mutex map_to_odom_mutex_;
     boost::mutex map_mutex_;
@@ -97,6 +100,11 @@ class SlamGMapping
     bool initMapper(const sensor_msgs::LaserScan& scan);
     bool addScan(const sensor_msgs::LaserScan& scan, GMapping::OrientedPoint& gmap_pose);
     double computePoseEntropy();
+
+    double getScanMaxLineAngle(const sensor_msgs::LaserScan& scan, bool& ok);
+    bool orthodonticMap(const sensor_msgs::LaserScan& scan);
+
+    void savePoseToTxt();
     
     // Parameters used by GMapping
     double maxRange_;
@@ -137,4 +145,11 @@ class SlamGMapping
     
     double transform_publish_period_;
     double tf_delay_;
+
+    line_feature::LineFeature line_feature_;
+    bool orthodontic_map_;
+    unsigned int orthodontic_map_count_;
+    GMapping::OrientedPoint initialPose;
+    GMapping::OrientedPoint map_pose;
+
 };
